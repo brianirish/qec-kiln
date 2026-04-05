@@ -1,5 +1,11 @@
 # qec-kiln
 
+[![DOI](https://zenodo.org/badge/1202285772.svg)](https://doi.org/10.5281/zenodo.19432340)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Stim](https://img.shields.io/badge/Stim-≥1.14-green.svg)](https://github.com/quantumlib/Stim)
+[![SkyPilot](https://img.shields.io/badge/SkyPilot-≥0.7-green.svg)](https://github.com/skypilot-org/skypilot)
+
 Fire your [Sinter](https://github.com/quantumlib/Stim/tree/main/glue/sample) QEC jobs across cloud spot instances with [SkyPilot](https://github.com/skypilot-org/skypilot).
 
 Sinter is the de facto standard for Monte Carlo sampling of quantum error correction circuits. It handles multicore parallelism, smart batching, decoder integration, and resumable CSV output — but it only runs on a single machine. This project adds the one thing it doesn't do: cloud-scale distribution across spot instances.

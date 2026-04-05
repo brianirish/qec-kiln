@@ -23,5 +23,9 @@ sky_logs/
 .idea/
 *.swp
 
+# Paper (LaTeX build artifacts)
+paper/
+docs/
+
 # OS
 .DS_Store

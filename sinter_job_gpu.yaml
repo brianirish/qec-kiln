@@ -1,0 +1,75 @@
+# Runs sinter collect with GPU support (for tsim circuits or GPU decoders).
+#
+# tsim circuits require GPU for efficient sampling. Sinter's custom Sampler
+# API can be used to plug tsim in as the sampling backend. GPU-accelerated
+# decoders (e.g., NVIDIA TensorRT) also benefit from this configuration.
+#
+# Usage (typically called by scripts/launch.sh --gpu, not directly):
+#   sky jobs launch configs/sinter_job_gpu.yaml \
+#     --env BATCH_ID=0 \
+#     --env DECODERS=pymatching \
+#     --env MAX_SHOTS=1000000 \
+#     --env MAX_ERRORS=1000
+
+name: sinter-gpu-batch-${BATCH_ID}
+
+resources:
+  accelerators: A100:1
+  use_spot: true
+  any_of:
+    - cloud: kubernetes
+    - cloud: lambda
+    - cloud: runpod
+    - cloud: aws
+    - cloud: gcp
+
+envs:
+  BATCH_ID: "0"
+  DECODERS: "pymatching"
+  MAX_SHOTS: "1000000"
+  MAX_ERRORS: "1000"
+  PROCESSES: "auto"
+
+file_mounts:
+  /circuits:
+    name: qec-kiln-circuits
+    store: s3
+    mode: MOUNT
+  /results:
+    name: qec-kiln-results
+    store: s3
+    mode: MOUNT
+
+setup: |
+  pip install stim sinter pymatching fusion-blossom
+  pip install "bloqade-tsim[cuda13]"
+
+run: |
+  set -euo pipefail
+
+  BATCH_DIR="/circuits/batch_${BATCH_ID}"
+  OUT_CSV="/results/batch_${BATCH_ID}/stats.csv"
+  mkdir -p "$(dirname "$OUT_CSV")"
+
+  CIRCUIT_COUNT=$(ls "$BATCH_DIR"/*.stim 2>/dev/null | wc -l)
+  echo "Batch ${BATCH_ID} (GPU): ${CIRCUIT_COUNT} circuits"
+  echo "Decoders: ${DECODERS}"
+  echo "Max shots: ${MAX_SHOTS}, Max errors: ${MAX_ERRORS}"
+
+  if [ "$CIRCUIT_COUNT" -eq 0 ]; then
+    echo "No circuits found in ${BATCH_DIR}, exiting."
+    exit 0
+  fi
+
+  sinter collect \
+    --processes "${PROCESSES}" \
+    --circuits "${BATCH_DIR}"/*.stim \
+    --metadata_func auto \
+    --decoders ${DECODERS} \
+    --max_shots "${MAX_SHOTS}" \
+    --max_errors "${MAX_ERRORS}" \
+    --save_resume_filepath "${OUT_CSV}"
+
+  echo ""
+  echo "Batch ${BATCH_ID} (GPU) complete. Results at ${OUT_CSV}"
+  echo "Lines: $(wc -l < "$OUT_CSV")"

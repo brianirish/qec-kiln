@@ -169,6 +169,16 @@ sinter plot \
 ```
 qec-kiln/
 ├── README.md
+├── LICENSE                      # Apache 2.0
+├── SECURITY.md                  # Vulnerability reporting and security considerations
+├── CONTRIBUTING.md              # How to contribute
+├── CODE_OF_CONDUCT.md           # Community guidelines
+├── CHANGELOG.md                 # Release history
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.md
+│   │   └── feature_request.md
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── configs/
 │   ├── sinter_job.yaml          # SkyPilot task: runs sinter collect on one batch
 │   └── sinter_job_gpu.yaml      # GPU variant (for tsim circuits or GPU decoders)

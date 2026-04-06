@@ -2,7 +2,7 @@
 
 ## Core principle
 
-Don't reinvent Sinter. Sinter is battle-tested, widely adopted, and handles the hard parts of QEC statistical collection (smart batching, decoder integration, resumable output, multicore parallelism). Our job is strictly the cloud distribution layer on top.
+Sinter handles QEC statistical collection (adaptive batch sizing, decoder integration, resumable output, multicore parallelism). qec-kiln is strictly the cloud distribution layer on top — it should not duplicate or replace any Sinter functionality.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ We partition **circuits across jobs**, not shots within a circuit.
 2. Custom merging logic to combine partial `TaskStats` correctly
 3. Careful handling of Sinter's adaptive batch sizing (it starts small, ramps up)
 
-None of this complexity is worth it when the natural parallelism unit — different circuits — is already embarrassingly parallel.
+This complexity is not justified when the natural parallelism unit — different circuits — is already embarrassingly parallel.
 
 **Why not one circuit per job?** Launching a SkyPilot job has non-trivial overhead (VM provisioning, setup commands, pip install). Batching 4-10 circuits per job amortizes this overhead while still achieving good parallelism.
 
@@ -48,10 +48,10 @@ This is why we use `sinter combine` for merging rather than writing custom aggre
 
 ## What we explicitly don't do
 
-- **Custom Sinter samplers**: Sinter has a `Sampler` API for custom backends. We don't use it because keeping integration at the job level is simpler and more robust.
-- **Custom result formats**: Sinter's CSV format is the community standard. PyMatching, Tesseract, and research papers all use it.
-- **Decoder management**: Sinter handles decoder installation and invocation. We just pass `--decoders` through.
-- **Circuit generation**: Researchers generate their own circuits. We provide examples but don't prescribe a workflow.
+- **Custom Sinter samplers**: Sinter has a `Sampler` API for custom backends. Job-level integration is simpler and avoids reimplementing scheduling and failure recovery.
+- **Custom result formats**: Sinter's CSV format is the standard interchange for QEC benchmarking. PyMatching, Tesseract, and published research all use it.
+- **Decoder management**: Sinter handles decoder installation and invocation. qec-kiln passes `--decoders` through.
+- **Circuit generation**: Researchers generate their own circuits. Examples are provided but no workflow is prescribed.
 
 ## Future possibilities
 

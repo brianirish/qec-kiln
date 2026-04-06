@@ -18,8 +18,9 @@ resources:
   use_spot: true
   any_of:
     - cloud: kubernetes
-    - cloud: lambda
     - cloud: runpod
+    - cloud: coreweave
+    - cloud: nebius
     - cloud: aws
     - cloud: gcp
 
@@ -34,7 +35,7 @@ file_mounts:
   /circuits:
     name: qec-kiln-circuits
     store: s3
-    mode: MOUNT
+    mode: MOUNT_CACHED
   /results:
     name: qec-kiln-results
     store: s3

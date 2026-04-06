@@ -6,31 +6,31 @@
 [![Stim](https://img.shields.io/badge/Stim-≥1.14-green.svg)](https://github.com/quantumlib/Stim)
 [![SkyPilot](https://img.shields.io/badge/SkyPilot-≥0.7-green.svg)](https://github.com/skypilot-org/skypilot)
 
-Fire your [Sinter](https://github.com/quantumlib/Stim/tree/main/glue/sample) QEC jobs across cloud spot instances with [SkyPilot](https://github.com/skypilot-org/skypilot).
+Distribute [Sinter](https://github.com/quantumlib/Stim/tree/main/glue/sample) QEC simulation jobs across cloud spot instances using [SkyPilot](https://github.com/skypilot-org/skypilot).
 
-Sinter is the de facto standard for Monte Carlo sampling of quantum error correction circuits. It handles multicore parallelism, smart batching, decoder integration, and resumable CSV output — but it only runs on a single machine. This project adds the one thing it doesn't do: cloud-scale distribution across spot instances.
+Sinter handles Monte Carlo sampling of quantum error correction circuits on a single machine — multicore parallelism, adaptive batch sizing, decoder integration, and resumable CSV output. qec-kiln adds multi-node distribution by partitioning circuit files across spot instances, with each node running an unmodified `sinter collect` process.
 
 ---
 
-## The gap
+## Motivation
 
-Sinter's own documentation says it plainly:
+From the Sinter documentation:
 
 > *"Sinter doesn't support cloud compute, but it does scale well on a single machine."*
 
-For many QEC studies, a single 96-core machine is enough. But for large sweeps — many code distances × noise rates × decoder comparisons × code families — a single machine becomes a bottleneck. A threshold study with 50+ circuit variants, each needing 1M+ shots and 1000+ errors, can take days even on a big workstation.
+For many QEC studies, a single machine is sufficient. However, large parameter sweeps — many code distances, noise rates, decoder comparisons, and code families — can take days on a single workstation. Chatterjee et al. reported running 8,640 Stim experiments over the course of weeks using four parallel workers, with individual runs at distance 25 taking approximately 62 hours.
 
-qec-kiln distributes those circuit variants across cloud spot instances. Each instance runs a standard `sinter collect` job (which already handles everything well on a single node), and the platform handles provisioning, cost optimization, failure recovery, and CSV merging.
+qec-kiln distributes circuit variants across cloud spot instances. Each instance runs a standard `sinter collect` process. SkyPilot handles provisioning, spot recovery, and cost optimization. qec-kiln handles circuit partitioning and CSV merging.
 
 ---
 
 ## How it works
 
-**Sinter handles the inner loop.** On each node, `sinter collect` manages multicore sampling, dynamic batch sizing, decoder invocation (PyMatching, fusion_blossom, Tesseract, etc.), and writes resumable CSV output. This is battle-tested code written by Craig Gidney. We don't touch it.
+The system has three layers:
 
-**SkyPilot handles the outer loop.** It provisions spot/preemptible instances across 20+ clouds and Kubernetes clusters, auto-recovers from preemptions, and finds the cheapest available compute. Each SkyPilot managed job runs one `sinter collect` invocation against a subset of circuits.
-
-**qec-kiln handles the glue.** It partitions circuit files across jobs, configures each Sinter invocation, collects the CSV fragments from cloud storage, and merges them into a single dataset compatible with `sinter plot`.
+- **Sinter** (inner loop): On each node, `sinter collect` manages multicore sampling, adaptive batch sizing, decoder invocation, and resumable CSV output. This code is unmodified.
+- **SkyPilot** (outer loop): Provisions spot/preemptible instances across cloud providers and Kubernetes clusters, handles preemption recovery, and selects the lowest-cost available compute.
+- **qec-kiln** (glue): Partitions circuit files across jobs, launches SkyPilot managed jobs, and merges the resulting CSV fragments via `sinter combine`.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -78,18 +78,38 @@ qec-kiln distributes those circuit variants across cloud spot instances. Each in
 
 ---
 
-## Why not just run Sinter on a big machine?
+## When to use this
 
-You absolutely can, and for small sweeps you should. qec-kiln is for when:
+For small sweeps, `sinter collect` on a single machine is sufficient. qec-kiln is useful when:
 
-- Your sweep has **50+ circuit files** and you want results in hours, not days
-- You don't have access to a **96-core workstation** and cloud spot instances are cheaper than buying one
-- You need **GPU-accelerated decoders** (e.g., NVIDIA's TensorRT decoder via CUDA-Q QEC) and don't own GPU hardware
-- You're running **tsim circuits** (Clifford+T) that benefit from GPU acceleration during sampling
-- You want to run **multiple decoder comparisons** (PyMatching vs. fusion_blossom vs. Tesseract) in parallel
-- Your lab's shared cluster is **oversubscribed** and cloud overflow would unblock your research
+- The sweep has many circuit variants (50+) and single-machine wall time becomes a constraint
+- No high-core-count workstation is available and cloud spot instances are more cost-effective
+- GPU-accelerated decoders or tsim (Clifford+T) circuits require GPU hardware not available locally
+- Multiple decoder comparisons (PyMatching, fusion_blossom, Tesseract) can be run in parallel
+- A shared lab cluster is oversubscribed and cloud compute can supplement it
 
-For a quick 6-circuit threshold study, just run `sinter collect` locally. This project exists for when that stops being enough.
+---
+
+## Why SkyPilot?
+
+qec-kiln uses [SkyPilot](https://github.com/skypilot-org/skypilot) for cloud orchestration rather than cloud-specific SDKs or custom job scheduling infrastructure.
+
+### General properties
+
+- **Multi-cloud resource selection.** A single YAML specifies resource requirements (e.g., 16+ CPUs or 1x A100 GPU). SkyPilot selects the lowest-cost spot instance across configured backends (AWS, GCP, Azure, Kubernetes, and others). If one provider lacks capacity, it falls through to the next.
+- **Spot preemption recovery.** When a spot instance is reclaimed, SkyPilot provisions a replacement and restarts the job. Combined with Sinter's `--save_resume_filepath`, no work is lost.
+- **Managed job controller.** `sky jobs launch` submits jobs to a controller that manages lifecycle, log streaming, and failure recovery. A single controller handles 2,000+ concurrent jobs.
+- **Slurm and Kubernetes support.** The same YAML can target HPC clusters via Slurm or Kubernetes deployments, in addition to cloud providers.
+
+### Fit for QEC simulation
+
+Sinter collection jobs have properties that align well with SkyPilot's execution model:
+
+1. **Embarrassingly parallel.** Each batch of circuits runs independently with no inter-node communication. This maps directly to independent managed jobs.
+2. **Spot-compatible by construction.** Sinter writes incremental CSV output and resumes from partial results. SkyPilot handles instance recovery; Sinter handles state recovery.
+3. **Short-lived.** Typical batches complete in 30–120 minutes. Short jobs have low preemption probability, and SkyPilot terminates instances on completion.
+4. **GPU access without ownership.** tsim circuits and GPU-accelerated decoders can run on spot A100 instances (e.g., ~$0.70–1.50/GPU-hour on current providers).
+5. **Reproducible.** The YAML is a complete job specification. Anyone with a configured cloud account can run the same sweep.
 
 ---
 
@@ -104,7 +124,7 @@ For a quick 6-circuit threshold study, just run `sinter collect` locally. This p
 
 ### 1. Generate your circuits
 
-Use Stim's built-in generators or your own circuit construction code. This is the step where the actual QEC research happens — qec-kiln doesn't change it at all.
+Use Stim's built-in generators or your own circuit construction code. qec-kiln does not modify this step.
 
 ```python
 import stim
@@ -211,11 +231,11 @@ Sinter has a `Sampler` API that allows custom sampling backends. We could theore
 
 ### Why Sinter's CSV format?
 
-Because the entire QEC ecosystem already speaks it. Sinter's `combine` and `plot` commands work on these CSVs. PyMatching's docs use them. Research papers publish threshold plots generated from them. Using a custom format would mean rebuilding all of that tooling for no benefit.
+Sinter's CSV format is the standard interchange for QEC benchmarking. Sinter's `combine` and `plot` commands operate on it, PyMatching's documentation uses it, and research papers publish threshold plots generated from it. A custom format would require reimplementing existing tooling.
 
 ### Spot instance compatibility
 
-Sinter's `--save_resume_filepath` flag makes it naturally spot-friendly. If a job is preempted and SkyPilot restarts it, Sinter picks up where it left off — it counts existing data in the CSV toward the collection targets. No custom checkpointing needed.
+Sinter's `--save_resume_filepath` flag writes statistics incrementally. If a spot instance is preempted and SkyPilot restarts the job, Sinter reads the existing CSV and counts collected data toward its targets. No additional checkpointing is needed.
 
 ---
 
@@ -231,16 +251,15 @@ qec-kiln works with any simulator or decoder that Sinter supports:
 
 ---
 
-## How a platform / SRE engineer adds value
+## Operational considerations
 
-This project is designed to be co-owned by a platform engineer and a QEC research team:
+For groups running qec-kiln regularly, a platform engineer can manage:
 
-- **Cluster management**: K8s node pools, NVIDIA device plugins, Kueue for fair-share GPU scheduling
-- **Cost engineering**: Spot instances as default, multi-cloud fallback, autostop policies, per-researcher cost dashboards
-- **Container pipeline**: Own the Docker images with pinned Stim/Sinter/decoder versions, CI to rebuild on releases
-- **Observability**: Prometheus/Grafana for job completion rates, GPU utilization, cost tracking
-- **Storage**: Configure S3/GCS buckets or K8s PVCs for CSV output with appropriate retention policies
-- **Guardrails**: Resource quotas and GPU-hour budgets so researchers can launch freely
+- **Cluster configuration**: K8s node pools, NVIDIA device plugins, Kueue for GPU scheduling
+- **Cost management**: Spot instance policies, multi-cloud fallback, autostop, per-user budgets
+- **Container images**: Pinned Stim/Sinter/decoder versions, CI rebuilds on upstream releases
+- **Monitoring**: Job completion rates, GPU utilization, cost tracking
+- **Storage**: S3/GCS bucket or K8s PVC configuration with retention policies
 
 ---
 

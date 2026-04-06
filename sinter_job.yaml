@@ -17,7 +17,8 @@ resources:
     - cloud: aws
     - cloud: gcp
     - cloud: azure
-    - cloud: lambda
+    - cloud: nebius
+    - cloud: coreweave
 
 envs:
   BATCH_ID: "0"
@@ -30,7 +31,7 @@ file_mounts:
   /circuits:
     name: qec-kiln-circuits
     store: s3
-    mode: MOUNT
+    mode: MOUNT_CACHED
   /results:
     name: qec-kiln-results
     store: s3

@@ -4,7 +4,8 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Stim](https://img.shields.io/badge/Stim-≥1.14-green.svg)](https://github.com/quantumlib/Stim)
-[![SkyPilot](https://img.shields.io/badge/SkyPilot-≥0.7-green.svg)](https://github.com/skypilot-org/skypilot)
+[![SkyPilot](https://img.shields.io/badge/SkyPilot-≥0.10-green.svg)](https://github.com/skypilot-org/skypilot)
+[![bloqade-tsim](https://img.shields.io/badge/bloqade--tsim-≥0.1-green.svg)](https://pypi.org/project/bloqade-tsim/)
 
 Distribute [Sinter](https://github.com/quantumlib/Stim/tree/main/glue/sample) QEC simulation jobs across cloud spot instances using [SkyPilot](https://github.com/skypilot-org/skypilot).
 

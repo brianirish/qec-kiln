@@ -1,76 +1,77 @@
-# Runs sinter collect with GPU support (for tsim circuits or GPU decoders).
+# Runs tsim sinter collection on GPU spot instances.
 #
-# tsim circuits require GPU for efficient sampling. Sinter's custom Sampler
-# API can be used to plug tsim in as the sampling backend. GPU-accelerated
-# decoders (e.g., NVIDIA TensorRT) also benefit from this configuration.
+# Uses collect_tsim.py (Python runner) instead of `sinter collect` CLI
+# because the CLI doesn't support custom_decoders.
 #
-# Usage (typically called by scripts/launch.sh --gpu, not directly):
-#   sky jobs launch configs/sinter_job_gpu.yaml \
+# Circuits are .circuit files (tsim text format) uploaded to S3.
+#
+# Usage:
+#   sky launch sinter_job_gpu.yaml -y -d \
+#     --name sinter-gpu-batch-0 \
 #     --env BATCH_ID=0 \
-#     --env DECODERS=pymatching \
 #     --env MAX_SHOTS=1000000 \
-#     --env MAX_ERRORS=1000
+#     --env MAX_ERRORS=10000 \
+#     -i 20 --down
 
 name: sinter-gpu-batch-${BATCH_ID}
 
 resources:
-  accelerators: A100:1
+  accelerators: {L4:1, A10G:1, A100:1}
   use_spot: true
+  image_id: docker:ghcr.io/brianirish/qec-kiln-worker-gpu:latest
   any_of:
-    - cloud: kubernetes
+    - cloud: aws
+    - cloud: gcp
     - cloud: runpod
     - cloud: coreweave
     - cloud: nebius
-    - cloud: aws
-    - cloud: gcp
 
 envs:
   BATCH_ID: "0"
-  DECODERS: "pymatching"
+  DECODER: "pymatching"
   MAX_SHOTS: "1000000"
-  MAX_ERRORS: "1000"
-  PROCESSES: "auto"
+  MAX_ERRORS: "10000"
 
 file_mounts:
   /circuits:
-    name: qec-kiln-circuits
-    store: s3
-    mode: MOUNT_CACHED
-  /results:
-    name: qec-kiln-results
-    store: s3
+    source: s3://qec-kiln-circuits
     mode: MOUNT
-
-setup: |
-  pip install stim sinter pymatching fusion-blossom
-  pip install "bloqade-tsim[cuda13]"
+  /results:
+    source: s3://qec-kiln-results
+    mode: MOUNT
 
 run: |
   set -euo pipefail
 
   BATCH_DIR="/circuits/batch_${BATCH_ID}"
-  OUT_CSV="/results/batch_${BATCH_ID}/stats.csv"
+  LOCAL_CSV="/tmp/stats_gpu_batch_${BATCH_ID}.csv"
+  OUT_CSV="/results/gpu_batch_${BATCH_ID}/stats.csv"
   mkdir -p "$(dirname "$OUT_CSV")"
 
-  CIRCUIT_COUNT=$(ls "$BATCH_DIR"/*.stim 2>/dev/null | wc -l)
-  echo "Batch ${BATCH_ID} (GPU): ${CIRCUIT_COUNT} circuits"
-  echo "Decoders: ${DECODERS}"
+  CIRCUIT_COUNT=$(ls "$BATCH_DIR"/*.circuit 2>/dev/null | wc -l)
+  echo "GPU Batch ${BATCH_ID}: ${CIRCUIT_COUNT} circuits"
+  echo "Decoder: ${DECODER}"
   echo "Max shots: ${MAX_SHOTS}, Max errors: ${MAX_ERRORS}"
 
+  # Verify GPU is visible
+  python3 -c "import jax; print(f'JAX devices: {jax.devices()}')"
+
   if [ "$CIRCUIT_COUNT" -eq 0 ]; then
-    echo "No circuits found in ${BATCH_DIR}, exiting."
+    echo "No .circuit files found in ${BATCH_DIR}, exiting."
     exit 0
   fi
 
-  sinter collect \
-    --processes "${PROCESSES}" \
-    --circuits "${BATCH_DIR}"/*.stim \
-    --metadata_func auto \
-    --decoders ${DECODERS} \
-    --max_shots "${MAX_SHOTS}" \
-    --max_errors "${MAX_ERRORS}" \
-    --save_resume_filepath "${OUT_CSV}"
+  # Use Python runner (CLI can't do custom_decoders)
+  python3 /workspace/collect_tsim.py \
+    --circuits-dir "${BATCH_DIR}" \
+    --output-csv "${LOCAL_CSV}" \
+    --max-shots "${MAX_SHOTS}" \
+    --max-errors "${MAX_ERRORS}" \
+    --decoder "${DECODER}" \
+    --num-workers 1
+
+  cp "${LOCAL_CSV}" "${OUT_CSV}"
 
   echo ""
-  echo "Batch ${BATCH_ID} (GPU) complete. Results at ${OUT_CSV}"
-  echo "Lines: $(wc -l < "$OUT_CSV")"
+  echo "GPU Batch ${BATCH_ID} complete. Results at ${OUT_CSV}"
+  echo "Lines: $(wc -l < "${LOCAL_CSV}")"

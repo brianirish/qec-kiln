@@ -1,20 +1,38 @@
-FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04
+# GPU worker image for qec-kiln tsim benchmarks.
+# Includes CUDA runtime, JAX, bloqade-tsim, and the sinter+tsim wrapper.
+#
+# Build & push:
+#   gh auth token | docker login ghcr.io -u brianirish --password-stdin
+#   docker buildx build --platform linux/amd64 \
+#     -f Dockerfile.gpu \
+#     -t ghcr.io/brianirish/qec-kiln-worker-gpu:latest --push .
+#
+# Used by sinter_job_gpu.yaml via:
+#   resources:
+#     image_id: docker:ghcr.io/brianirish/qec-kiln-worker-gpu:latest
+
+FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 
+# SkyPilot requires sudo, rsync, and python3 with pip
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip git && rm -rf /var/lib/apt/lists/*
+        sudo rsync curl ca-certificates git \
+        python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash researcher
-USER researcher
-WORKDIR /home/researcher
+# QEC simulation stack
+RUN pip install --no-cache-dir \
+        stim sinter pymatching fusion-blossom \
+        "bloqade-tsim[cuda12]" \
+        numpy
 
-RUN python3 -m pip install --user --no-cache-dir \
-    stim sinter pymatching fusion-blossom \
-    "bloqade-tsim[cuda13]" \
-    pandas numpy matplotlib
+# Patch sinter for numpy 2.x compat
+COPY patches/sinter_numpy2_fix.py /tmp/sinter_numpy2_fix.py
+RUN python3 /tmp/sinter_numpy2_fix.py && rm /tmp/sinter_numpy2_fix.py
 
-ENV PATH="/home/researcher/.local/bin:${PATH}"
+# Copy the tsim wrapper and runner
+COPY tsim_sampler.py /workspace/tsim_sampler.py
+COPY collect_tsim.py /workspace/collect_tsim.py
 
-RUN python3 -c "import stim, sinter, tsim; print('stim + sinter + tsim OK')"
-CMD ["bash"]
+WORKDIR /workspace

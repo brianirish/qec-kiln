@@ -142,8 +142,13 @@ class _CompiledTsimThenDecodeSampler(CompiledSampler):
         # The two `use_*_reference_sample=True` flags align tsim's detection
         # convention with stim's (tsim reports absolute detector bits by default;
         # stim reports XOR against a noiseless reference). See tsim README.
+        # Pin batch_size to max_shots so results are reproducible given
+        # the same seed. Without this, tsim auto-selects batch_size based
+        # on available memory, and the seed/batch-size coupling (tsim#104)
+        # means the same seed can produce different samples.
         dets, actual_obs = self._tsim_sampler.sample(
             shots=max_shots,
+            batch_size=max_shots,
             bit_packed=True,
             separate_observables=True,
             use_detector_reference_sample=True,

@@ -1,17 +1,20 @@
-# Runs sinter collect on a batch of .stim circuit files (CPU).
+# Variant of sinter_job.yaml that uses a pre-built Docker image with
+# stim/sinter/pymatching/fusion-blossom already installed. Skips the
+# ~3-5 min pip install at every cluster cold start.
 #
-# Usage (typically called by scripts/launch.sh, not directly):
-#   sky jobs launch configs/sinter_job.yaml \
-#     --env BATCH_ID=0 \
-#     --env DECODERS=pymatching \
-#     --env MAX_SHOTS=1000000 \
-#     --env MAX_ERRORS=1000
+# Image: ghcr.io/brianirish/qec-kiln-worker:latest (built from ./Dockerfile)
+#
+# Usage (parallel cluster launch, see BENCHMARK.md):
+#   sky launch sinter_job_docker.yaml -y -d \
+#     --name sinter-batch-${i} \
+#     --env BATCH_ID=${i} ...
 
 name: sinter-batch-${BATCH_ID}
 
 resources:
   cpus: 16+
   use_spot: true
+  image_id: docker:ghcr.io/brianirish/qec-kiln-worker:latest
   any_of:
     - cloud: kubernetes
     - cloud: aws
@@ -34,8 +37,10 @@ file_mounts:
     source: s3://qec-kiln-results
     mode: MOUNT
 
-setup: |
-  pip install stim sinter pymatching fusion-blossom
+# No setup block: stim, sinter, pymatching, fusion-blossom are baked
+# into the docker image. SkyPilot still installs its own runtime inside
+# the container, which adds ~30 sec, but skips the multi-minute wheel
+# downloads for the QEC deps.
 
 run: |
   set -euo pipefail

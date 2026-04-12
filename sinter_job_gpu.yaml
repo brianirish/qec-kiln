@@ -16,15 +16,11 @@
 name: sinter-gpu-batch-${BATCH_ID}
 
 resources:
-  accelerators: {L4:1, A10G:1, A100:1}
+  accelerators: {L4:1, L40S:1, A10:1, A10G:1, A100-80GB:1, RTX4090:1, RTX3090:1}
   use_spot: true
-  image_id: docker:ghcr.io/brianirish/qec-kiln-worker-gpu:latest
+  image_id: docker:ohheyitsbrian/qec-kiln-worker-gpu:latest
   any_of:
     - cloud: aws
-    - cloud: gcp
-    - cloud: runpod
-    - cloud: coreweave
-    - cloud: nebius
 
 envs:
   BATCH_ID: "0"
@@ -32,21 +28,19 @@ envs:
   MAX_SHOTS: "1000000"
   MAX_ERRORS: "10000"
 
+# RunPod doesn't support FUSE-mounting S3, so we COPY circuits in at job
+# start and explicitly aws s3 cp the results back. Works on AWS too.
 file_mounts:
   /circuits:
     source: s3://qec-kiln-circuits
-    mode: MOUNT
-  /results:
-    source: s3://qec-kiln-results
-    mode: MOUNT
+    mode: COPY
 
 run: |
   set -euo pipefail
 
   BATCH_DIR="/circuits/batch_${BATCH_ID}"
   LOCAL_CSV="/tmp/stats_gpu_batch_${BATCH_ID}.csv"
-  OUT_CSV="/results/gpu_batch_${BATCH_ID}/stats.csv"
-  mkdir -p "$(dirname "$OUT_CSV")"
+  S3_OUT="s3://qec-kiln-results/gpu_batch_${BATCH_ID}/stats.csv"
 
   CIRCUIT_COUNT=$(ls "$BATCH_DIR"/*.circuit 2>/dev/null | wc -l)
   echo "GPU Batch ${BATCH_ID}: ${CIRCUIT_COUNT} circuits"
@@ -61,6 +55,9 @@ run: |
     exit 0
   fi
 
+  # awscli isn't in the docker image; install at runtime (~30 sec)
+  pip install --quiet awscli
+
   # Use Python runner (CLI can't do custom_decoders)
   python3 /workspace/collect_tsim.py \
     --circuits-dir "${BATCH_DIR}" \
@@ -70,8 +67,9 @@ run: |
     --decoder "${DECODER}" \
     --num-workers 1
 
-  cp "${LOCAL_CSV}" "${OUT_CSV}"
+  # Upload results back to S3 (RunPod can't FUSE-mount, so we copy explicitly)
+  aws s3 cp "${LOCAL_CSV}" "${S3_OUT}"
 
   echo ""
-  echo "GPU Batch ${BATCH_ID} complete. Results at ${OUT_CSV}"
+  echo "GPU Batch ${BATCH_ID} complete. Results at ${S3_OUT}"
   echo "Lines: $(wc -l < "${LOCAL_CSV}")"

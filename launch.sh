@@ -68,15 +68,15 @@ fi
 
 # --- Select task YAML ---
 if $GPU; then
-  YAML="configs/sinter_job_gpu.yaml"
+  YAML="sinter_job_gpu.yaml"
 else
-  YAML="configs/sinter_job.yaml"
+  YAML="sinter_job.yaml"
 fi
 
 # --- Partition circuits ---
 BATCH_DIR=$(mktemp -d)
 echo "Partitioning ${CIRCUIT_COUNT} circuits into batches of ${CIRCUITS_PER_JOB}..."
-python scripts/partition.py "$CIRCUITS_DIR" \
+python3 partition.py "$CIRCUITS_DIR" \
   --circuits-per-job "$CIRCUITS_PER_JOB" \
   --output-dir "$BATCH_DIR"
 
@@ -118,6 +118,7 @@ echo ""
 for i in $(seq 0 $((NUM_BATCHES - 1))); do
   echo "[${i}/${NUM_BATCHES}] Launching sinter-batch-${i}..."
   sky jobs launch "$YAML" -y \
+    --name "sinter-batch-${i}" \
     --env BATCH_ID="${i}" \
     --env DECODERS="${DECODERS}" \
     --env MAX_SHOTS="${MAX_SHOTS}" \

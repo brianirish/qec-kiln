@@ -9,11 +9,28 @@ and require tsim's ZX stabilizer-rank simulator.
 
 The base distillation protocol is the 5-qubit Reichardt-style magic state
 distillation from tsim's own demo (docs/demos/magic_state_distillation.ipynb).
-For K > 1, we compose K independent rounds on disjoint sets of 5 qubits,
-giving total T-count = 12K. Disjoint placement avoids the basis-bookkeeping
-subtleties of iterative composition while exercising the same stabilizer-rank
-growth in tsim, since tsim's cost is driven by total T-count regardless of
-which qubits the T gates act on.
+For K > 1, we compose K independent rounds on disjoint sets of 5 qubits.
+
+## Observable and post-selection
+
+The Reichardt protocol is *post-selected on the success syndrome*
+[M1, M2, M3, M4] == [1, 0, 1, 1]. Only on that branch does the inverse
+magic-state preparation (T; R_X(-theta)) on q0 map the distilled |T> back
+to |0>, making M0 a meaningful fidelity indicator (M0 = 0 on success).
+
+We encode the success syndrome as deterministic ancilla measurements:
+for each round k we allocate 4 ancilla qubits (one per syndrome bit), prep
+them to the expected [1, 0, 1, 1] via R + selective X, then M. Each
+DETECTOR XORs one data-syndrome measurement against its ancilla expectation,
+so the detector fires exactly when the syndrome bit deviates from success.
+Sinter discards shots where any detector fires; on the surviving shots,
+OBSERVABLE_INCLUDE(k) rec[...] = raw M0_k fires when q0 is measured as |1>
+(distillation error).
+
+This circuit family requires the tsim wrapper to be invoked with
+use_reference_samples=False, because XOR-against-noiseless-reference
+would subtract a random-syndrome-branch reference from every shot and
+make post-selection meaningless. See `collect_tsim.py --no-reference-samples`.
 
 Usage:
     python generate_tsim_circuits.py
@@ -31,13 +48,8 @@ import os
 THETA = -math.acos(math.sqrt(1 / 3)) / math.pi
 
 
-def _round_block(qubits: tuple[int, int, int, int, int], p: float) -> list[str]:
-    """Emit one round of 5-qubit distillation on the given disjoint qubit indices.
-
-    The block prepares 5 noisy magic states, runs the distillation gates, and
-    measures all 5 qubits. The caller is responsible for emitting DETECTOR and
-    OBSERVABLE_INCLUDE annotations against the resulting measurement records.
-    """
+def _round_gates(qubits: tuple[int, int, int, int, int], p: float) -> list[str]:
+    """Emit the distillation gates for one round, ending with M on the 5 data qubits."""
     q0, q1, q2, q3, q4 = qubits
     qall = f"{q0} {q1} {q2} {q3} {q4}"
     return [
@@ -60,45 +72,77 @@ def _round_block(qubits: tuple[int, int, int, int, int], p: float) -> list[str]:
     ]
 
 
+# Success syndrome for Reichardt 5-to-1 distillation on [M1, M2, M3, M4].
+SUCCESS_SYNDROME = (1, 0, 1, 1)
+
+
 def build_distillation_circuit_text(K: int, p: float) -> str:
-    """Build K independent rounds of 5-qubit distillation in one circuit.
+    """Build K independent rounds of 5-qubit distillation with ancilla-encoded post-selection.
 
-    Each round occupies 5 disjoint qubits. Total qubits = 5K, total
-    T-count = 12K. After all measurements, we emit 4 syndrome detectors
-    and 1 observable per round, using rec[] indices counted from the end.
+    Qubit layout:
+        Data qubits: 0 .. 5K-1  (5 per round, disjoint blocks)
+        Ancillas:    5K .. 9K-1 (4 per round, encode success syndrome [1,0,1,1])
 
-    Args:
-        K: Number of independent distillation rounds (T-count = 12*K).
-        p: Depolarizing noise rate applied after magic state preparation.
+    Measurement order: all data measurements first (5K, in round-order q0..q4 per
+    round), then all ancilla measurements (4K, in round-order a1..a4 per round).
+
+    Detectors: 4K total, each XOR-ing one data syndrome bit against its ancilla.
+    Observables: K total, each = raw M0 for that round (error = |1> on success branch).
     """
     if K < 1:
         raise ValueError(f"K must be >= 1, got {K}")
 
+    data_qubit_count = 5 * K
+    total_meas = 9 * K  # 5K data + 4K ancilla
+
     lines: list[str] = []
+
+    # K distillation blocks on disjoint 5-qubit data registers.
     for k in range(K):
         base = 5 * k
-        qubits = (base, base + 1, base + 2, base + 3, base + 4)
-        lines.extend(_round_block(qubits, p))
+        lines.extend(_round_gates((base, base + 1, base + 2, base + 3, base + 4), p))
 
-    # All measurements are now appended to the rec stack. Round k contributed
-    # 5 measurements in order [q0, q1, q2, q3, q4]. Round K-1 is most recent.
-    # rec[-1] is the last measurement (q4 of round K-1), rec[-5] is q0 of K-1,
-    # rec[-6] is q4 of K-2, etc.
+    # Ancillas: prep deterministic [1, 0, 1, 1] per round, then measure.
+    all_ancillas = list(range(data_qubit_count, data_qubit_count + 4 * K))
+    lines.append("R " + " ".join(str(a) for a in all_ancillas))
+    flipped = []
     for k in range(K):
-        rounds_after_this = K - 1 - k
-        offset = 5 * rounds_after_this
-        # qubits in measurement order: q0, q1, q2, q3, q4
-        # rec offsets from end: -(offset+5), -(offset+4), -(offset+3), -(offset+2), -(offset+1)
-        rec_q0 = -(offset + 5)
-        rec_q1 = -(offset + 4)
-        rec_q2 = -(offset + 3)
-        rec_q3 = -(offset + 2)
-        rec_q4 = -(offset + 1)
-        lines.append(f"DETECTOR rec[{rec_q1}]")
-        lines.append(f"DETECTOR rec[{rec_q2}]")
-        lines.append(f"DETECTOR rec[{rec_q3}]")
-        lines.append(f"DETECTOR rec[{rec_q4}]")
-        lines.append(f"OBSERVABLE_INCLUDE({k}) rec[{rec_q0}]")
+        a1 = data_qubit_count + 4 * k + 0
+        a2 = data_qubit_count + 4 * k + 1
+        a3 = data_qubit_count + 4 * k + 2
+        a4 = data_qubit_count + 4 * k + 3
+        if SUCCESS_SYNDROME[0] == 1:
+            flipped.append(a1)
+        if SUCCESS_SYNDROME[1] == 1:
+            flipped.append(a2)
+        if SUCCESS_SYNDROME[2] == 1:
+            flipped.append(a3)
+        if SUCCESS_SYNDROME[3] == 1:
+            flipped.append(a4)
+    if flipped:
+        lines.append("X " + " ".join(str(a) for a in flipped))
+    lines.append("M " + " ".join(str(a) for a in all_ancillas))
+
+    # rec index helpers (relative to final measurement list of length total_meas).
+    def data_rec(k: int, i: int) -> int:
+        # Data measurement q_i in round k. Position from start: 5k + i. Negative from end:
+        return -(total_meas - (5 * k + i))
+
+    def ancilla_rec(k: int, j: int) -> int:
+        # Ancilla a_j in round k. Position from start: 5K + 4k + j.
+        return -(total_meas - (5 * K + 4 * k + j))
+
+    # Detectors: one per syndrome bit per round. Fires when M_{i+1} XOR a_i == 1,
+    # i.e. when the syndrome bit deviates from the success pattern encoded in a_i.
+    for k in range(K):
+        for j in range(4):
+            # data syndrome bit is M_{j+1} of this round.
+            lines.append(f"DETECTOR rec[{data_rec(k, j + 1)}] rec[{ancilla_rec(k, j)}]")
+
+    # Observables: raw M0 per round. On the post-selected success branch, noiseless
+    # M0 = 0, so observable = 1 is a logical error.
+    for k in range(K):
+        lines.append(f"OBSERVABLE_INCLUDE({k}) rec[{data_rec(k, 0)}]")
 
     return "\n".join(lines)
 
@@ -136,7 +180,8 @@ def main():
     print(f"  K (rounds): {args.rounds}  -> T-counts: {[12*k for k in args.rounds]}")
     print(f"  Noise rates: {args.noise_rates}")
     print(f"  Total circuits: {len(args.rounds)} * {len(args.noise_rates)} = {count}")
-    print(f"\nThese require tsim (not Stim) for simulation.")
+    print(f"\nThese circuits REQUIRE --no-reference-samples on collect_tsim.py")
+    print(f"and postselection_mask covering all detectors (sinter discards on syndrome deviation).")
 
 
 if __name__ == "__main__":

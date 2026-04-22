@@ -60,6 +60,7 @@ class TsimThenDecodeSampler(Sampler):
         count_observable_error_combos: bool = False,
         count_detection_events: bool = False,
         tmp_dir: Optional[pathlib.Path] = None,
+        use_reference_samples: bool = True,
     ):
         """
         Args:
@@ -68,6 +69,13 @@ class TsimThenDecodeSampler(Sampler):
             count_observable_error_combos: pass-through to the decoder behavior.
             count_detection_events: pass-through to the decoder behavior.
             tmp_dir: optional working directory for decoders that require disk.
+            use_reference_samples: pass use_detector_reference_sample and
+                use_observable_reference_sample to tsim.sample. Default True for
+                stim-compat Clifford paths. Set False when detectors encode
+                syndrome-vs-constant XORs directly (e.g. magic-state distillation
+                with ancilla-encoded expected syndrome); in that case XORing
+                against a noiseless reference shot would wash the syndrome
+                selection out against a random reference branch.
         """
         if decoder_name not in sinter.BUILT_IN_DECODERS:
             raise ValueError(
@@ -78,6 +86,7 @@ class TsimThenDecodeSampler(Sampler):
         self.count_observable_error_combos = count_observable_error_combos
         self.count_detection_events = count_detection_events
         self.tmp_dir = tmp_dir
+        self.use_reference_samples = use_reference_samples
 
     def compiled_sampler_for_task(self, task: Task) -> CompiledSampler:
         # Lazy import of tsim so spawned workers don't pay the JAX import
@@ -92,6 +101,7 @@ class TsimThenDecodeSampler(Sampler):
             count_observable_error_combos=self.count_observable_error_combos,
             tmp_dir=self.tmp_dir,
             tsim_module=tsim,
+            use_reference_samples=self.use_reference_samples,
         )
 
 
@@ -107,8 +117,10 @@ class _CompiledTsimThenDecodeSampler(CompiledSampler):
         count_detection_events: bool,
         tmp_dir: Optional[pathlib.Path],
         tsim_module,
+        use_reference_samples: bool = True,
     ):
         self.task = task
+        self.use_reference_samples = use_reference_samples
         self.compiled_decoder = _compile_decoder_with_disk_fallback(decoder, task, tmp_dir)
 
         # THE WHOLE POINT: replace stim's sampler with tsim's.
@@ -151,8 +163,8 @@ class _CompiledTsimThenDecodeSampler(CompiledSampler):
             batch_size=max_shots,
             bit_packed=True,
             separate_observables=True,
-            use_detector_reference_sample=True,
-            use_observable_reference_sample=True,
+            use_detector_reference_sample=self.use_reference_samples,
+            use_observable_reference_sample=self.use_reference_samples,
         )
         num_shots = dets.shape[0]
 
@@ -166,16 +178,12 @@ class _CompiledTsimThenDecodeSampler(CompiledSampler):
             for b in range(8):
                 custom_counts['detection_events'] += int(np.count_nonzero(dets & (1 << b)))
 
-        # Discard any shots that contain a postselected detection event.
-        if self.task.postselection_mask is not None:
-            discarded_flags = np.any(dets & self.task.postselection_mask, axis=1)
-            num_discards_1 = int(np.count_nonzero(discarded_flags))
-            if num_discards_1:
-                dets = dets[~discarded_flags, :]
-                actual_obs = actual_obs[~discarded_flags, :]
-        else:
-            num_discards_1 = 0
-
+        # Decode BEFORE post-selection so the shape check below compares
+        # against the true sampled shot count. (sinter's upstream
+        # _CompiledStimThenDecodeSampler decodes after post-selection but then
+        # asserts predictions.shape[0] == num_shots, which spuriously fires
+        # whenever any shot is discarded via postselection_mask. We do it in
+        # the safe order.)
         predictions = self.compiled_decoder.decode_shots_bit_packed(
             bit_packed_detection_event_data=dets
         )
@@ -191,6 +199,18 @@ class _CompiledTsimThenDecodeSampler(CompiledSampler):
             raise ValueError("decoder predictions.shape[1] < num observable bytes")
         if predictions.shape[1] > actual_obs.shape[1] + 1:
             raise ValueError("decoder predictions.shape[1] > num observable bytes + 1")
+
+        # Now apply post-selection to dets + predictions + actual_obs together.
+        if self.task.postselection_mask is not None:
+            discarded_flags = np.any(dets & self.task.postselection_mask, axis=1)
+            num_discards_1 = int(np.count_nonzero(discarded_flags))
+            if num_discards_1:
+                keep = ~discarded_flags
+                dets = dets[keep, :]
+                actual_obs = actual_obs[keep, :]
+                predictions = predictions[keep, :]
+        else:
+            num_discards_1 = 0
 
         num_discards_2, num_errors = classify_discards_and_errors(
             actual_obs=actual_obs,

@@ -16,7 +16,8 @@ resources:
   use_spot: true
   image_id: docker:ghcr.io/brianirish/qec-kiln-worker:latest
   any_of:
-    - cloud: kubernetes
+    # Kubernetes dropped for this trial because skypilot[kubernetes] extras
+    # are not installed in the local uv tool env; re-add once available.
     - cloud: aws
     - cloud: gcp
     - cloud: azure
@@ -28,6 +29,10 @@ envs:
   MAX_SHOTS: "1000000"
   MAX_ERRORS: "1000"
   PROCESSES: "auto"
+  # RESULTS_PREFIX lets callers route output to a subdirectory of
+  # s3://qec-kiln-results without overwriting prior baseline CSVs.
+  # Default "" preserves legacy behavior (writes to batch_${BATCH_ID}/).
+  RESULTS_PREFIX: ""
 
 file_mounts:
   /circuits:
@@ -46,7 +51,12 @@ run: |
   set -euo pipefail
 
   BATCH_DIR="/circuits/batch_${BATCH_ID}"
-  OUT_CSV="/results/batch_${BATCH_ID}/stats.csv"
+  if [ -n "${RESULTS_PREFIX}" ]; then
+    OUT_CSV="/results/${RESULTS_PREFIX}/batch_${BATCH_ID}/stats.csv"
+  else
+    OUT_CSV="/results/batch_${BATCH_ID}/stats.csv"
+  fi
+  PARTIAL_CSV="${OUT_CSV%.csv}.partial.csv"
   LOCAL_CSV="/tmp/stats_batch_${BATCH_ID}.csv"
   mkdir -p "$(dirname "$OUT_CSV")"
 
@@ -60,6 +70,30 @@ run: |
     exit 0
   fi
 
+  # Spot-preempt durability: if a prior run's partial CSV survives in S3
+  # at ${PARTIAL_CSV}, seed LOCAL_CSV with it so sinter resumes from the
+  # last synced point rather than restarting the batch from scratch.
+  if [ -f "${PARTIAL_CSV}" ]; then
+    echo "Found prior partial at ${PARTIAL_CSV} ($(wc -l < "${PARTIAL_CSV}") lines); resuming."
+    cp "${PARTIAL_CSV}" "${LOCAL_CSV}"
+  fi
+
+  # Background sync: copy the growing local CSV to S3 (via /results FUSE
+  # mount) every 60s so spot preemption preserves progress. FUSE is fine
+  # for whole-file writes; we only use /tmp for sinter's own atomic
+  # append/rename pattern.
+  (
+    while true; do
+      sleep 60
+      if [ -f "${LOCAL_CSV}" ]; then
+        cp "${LOCAL_CSV}" "${PARTIAL_CSV}.tmp" 2>/dev/null && \
+          mv "${PARTIAL_CSV}.tmp" "${PARTIAL_CSV}" 2>/dev/null || true
+      fi
+    done
+  ) &
+  SYNC_PID=$!
+  trap 'kill ${SYNC_PID} 2>/dev/null || true' EXIT
+
   # Write to local disk (S3 FUSE mount does not support flush).
   # Copy to S3 on completion.
   sinter collect \
@@ -71,7 +105,11 @@ run: |
     --max_errors "${MAX_ERRORS}" \
     --save_resume_filepath "${LOCAL_CSV}"
 
+  kill ${SYNC_PID} 2>/dev/null || true
+  wait ${SYNC_PID} 2>/dev/null || true
+
   cp "${LOCAL_CSV}" "${OUT_CSV}"
+  rm -f "${PARTIAL_CSV}" "${PARTIAL_CSV}.tmp" 2>/dev/null || true
 
   echo ""
   echo "Batch ${BATCH_ID} complete. Results at ${OUT_CSV}"
